@@ -1,3 +1,5 @@
 streamlit
 openpyxl
 xlwings
+scipy.optimize
+xlcalculator
