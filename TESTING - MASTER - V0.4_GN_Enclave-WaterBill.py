@@ -1,6 +1,7 @@
 import streamlit as st
 import openpyxl
 from openpyxl.utils import get_column_letter
+from scipy.optimize import fsolve
 import datetime
 import tempfile
 import os
@@ -128,20 +129,23 @@ def copy_last_col_and_paste_totals(ws_calc, month, year):
     ws_calc.cell(row=29, column=next_col, value=f"=AVERAGE({col_letter}2:{col_letter}27)")
     return next_col
 
-def run_goal_seek_with_xlwings(file_path):
-    import xlwings as xw
-    app = xw.App(visible=False)
-    app.display_alerts = False
-    app.screen_updating = False
+def run_goal_seek_python(calc_ws):
     try:
-        wb = app.books.open(file_path)
-        ws = wb.sheets['Calculation']
-        target_value = ws.range('E31').value
-        ws.range('E28').api.GoalSeek(Goal=target_value, ChangingCell=ws.range('C33').api)
-        wb.save()
-        wb.close()
-    finally:
-        app.quit()
+        target = calc_ws["E31"].value
+
+        def formula(c33_val):
+            calc_ws["C33"] = c33_val
+            values = []
+            for row in range(2, 28):
+                val = calc_ws.cell(row=row, column=5).value  # Column E
+                if isinstance(val, (int, float)):
+                    values.append(val)
+            return sum(values) - target
+
+        result = fsolve(formula, x0=1000)[0]
+        calc_ws["C33"] = result
+    except Exception as e:
+        st.error(f"Goal Seek failed: {e}")
 
 def process_files(wateron_bytes, enclave_bytes, tankers, cauvery, month, year):
     with st.spinner('Step 1: Creating temp files...'):
@@ -166,8 +170,12 @@ def process_files(wateron_bytes, enclave_bytes, tankers, cauvery, month, year):
         wb1.close()
         wb2.close()
     time.sleep(0.5)
-    with st.spinner('Step 6: Running Goal Seek with xlwings...'):
-        run_goal_seek_with_xlwings(temp_enclave_path)
+    with st.spinner('Step 6: Running Goal Seek with scipy...'):
+        wb2 = openpyxl.load_workbook(temp_enclave_path)
+        calc_ws = wb2["Calculation"]
+        run_goal_seek_python(calc_ws)
+        wb2.save(temp_enclave_path)
+        wb2.close()
     time.sleep(0.5)
     with st.spinner('Step 7: Copying C33 to last but one cell...'):
         wb2 = openpyxl.load_workbook(temp_enclave_path)
@@ -243,9 +251,7 @@ if st.session_state['completed']:
     with col3:
         if st.button("Exit"):
             st.warning("You can now close this browser tab. The Streamlit process will exit.")
-            import os
             os._exit(0)
 
-# Author credit at the bottom
 st.markdown("<hr style='margin-top:2em;margin-bottom:1em'>", unsafe_allow_html=True)
 st.markdown("<div style='text-align:center; color:gray; font-size: 1.1em;'>Developed by Vinay Kumar K | Cloud Architect</div>", unsafe_allow_html=True)
