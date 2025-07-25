@@ -1,7 +1,6 @@
 import streamlit as st
 import openpyxl
 from openpyxl.utils import get_column_letter
-from scipy.optimize import fsolve
 import datetime
 import tempfile
 import os
@@ -129,25 +128,22 @@ def copy_last_col_and_paste_totals(ws_calc, month, year):
     ws_calc.cell(row=29, column=next_col, value=f"=AVERAGE({col_letter}2:{col_letter}27)")
     return next_col
 
-def run_goal_seek_python(calc_ws):
+def run_goal_seek_with_xlwings(file_path):
+    import xlwings as xw
+    app = xw.App(visible=False)
+    app.display_alerts = False
+    app.screen_updating = False
     try:
-        target = calc_ws["E31"].value
+        wb = app.books.open(file_path)
+        ws = wb.sheets['Calculation']
+        target_value = ws.range('E31').value
+        ws.range('E28').api.GoalSeek(Goal=target_value, ChangingCell=ws.range('C33').api)
+        wb.save()
+        wb.close()
+    finally:
+        app.quit()
 
-        def formula(c33_val):
-            calc_ws["C33"] = c33_val
-            values = []
-            for row in range(2, 28):
-                val = calc_ws.cell(row=row, column=5).value  # Column E
-                if isinstance(val, (int, float)):
-                    values.append(val)
-            return sum(values) - target
-
-        result = fsolve(formula, x0=1000)[0]
-        calc_ws["C33"] = result
-    except Exception as e:
-        st.error(f"Goal Seek failed: {e}")
-
-def process_files(wateron_bytes, enclave_bytes, tankers, cauvery, month, year):
+def process_files(wateron_bytes, enclave_bytes, tankers, cauvery, month, year, arrears_data=None):
     with st.spinner('Step 1: Creating temp files...'):
         with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as temp_enclave:
             temp_enclave.write(enclave_bytes.getbuffer())
@@ -166,16 +162,23 @@ def process_files(wateron_bytes, enclave_bytes, tankers, cauvery, month, year):
     with st.spinner('Step 5: Copying last column and pasting totals...'):
         calc_ws = wb2["Calculation"]
         new_col = copy_last_col_and_paste_totals(calc_ws, month, year)
+        # Paste arrears/move in-out amounts if provided
+        if arrears_data:
+            for flat, amount in arrears_data:
+                if not flat or amount is None:
+                    continue
+                flat_prefix = flat[:2].upper()
+                for row in calc_ws.iter_rows(min_row=1, max_row=calc_ws.max_row, min_col=1, max_col=1):
+                    cell_val = str(row[0].value).strip().upper() if row[0].value else ''
+                    if cell_val.startswith(flat_prefix):
+                        calc_ws.cell(row=row[0].row, column=7, value=amount)  # Column G is 7
+                        break
         wb2.save(temp_enclave_path)
         wb1.close()
         wb2.close()
     time.sleep(0.5)
-    with st.spinner('Step 6: Running Goal Seek with scipy...'):
-        wb2 = openpyxl.load_workbook(temp_enclave_path)
-        calc_ws = wb2["Calculation"]
-        run_goal_seek_python(calc_ws)
-        wb2.save(temp_enclave_path)
-        wb2.close()
+    with st.spinner('Step 6: Running Goal Seek with xlwings...'):
+        run_goal_seek_with_xlwings(temp_enclave_path)
     time.sleep(0.5)
     with st.spinner('Step 7: Copying C33 to last but one cell...'):
         wb2 = openpyxl.load_workbook(temp_enclave_path)
@@ -206,23 +209,73 @@ if 'completed' not in st.session_state:
     st.session_state['completed'] = False
 
 if not st.session_state['completed']:
+    flat_options = [
+        "Apartment",
+        "F1 - Prakash Shanmugam",
+        "F2 - B Surya Kumar",
+        "F3 - Deepak Mishra",
+        "F4 - Satish Eedupugandi",
+        "F5 - Umashankar S",
+        "F6 - Mohan R",
+        "G1 - Mohammed Yousuf",
+        "G2 - Vinay kumar",
+        "G3 - Salim Basha",
+        "G4 - Gyandeep Muni",
+        "G5 - Venkata  Adhikarla",
+        "G6 - Rita Rajesh Bhosale",
+        "S1 - Hemant Diwan",
+        "S2 - Amal Sharath",
+        "S3 - Satish Lalaseri",
+        "S4 - Puneet Chansauria",
+        "S5 - Vishal Shrimal",
+        "S6 - B Subba Rao",
+        "T1 - Deb Nayak",
+        "T2 - Sundar",
+        "T3 - Baiju",
+        "T4 - Arindam Datta",
+        "T5 - Lata Kapoor",
+        "T6 - Ajay Kushwah"
+    ]
+    if 'arrears_count' not in st.session_state:
+        st.session_state['arrears_count'] = 1
+    if 'arrears_data' not in st.session_state:
+        st.session_state['arrears_data'] = []
     with st.form(key=f'input_form_{st.session_state["run_id"]}'):
         wateron_file = st.file_uploader("Water Utilization Report (WaterOn)", type=["xlsx"])
         enclave_file = st.file_uploader("GN Enclave Water Bill Sheet", type=["xlsx"])
         tankers = st.text_input("Number of water tankers utilized:")
         cauvery = st.text_input("Cauvery water bill amount:")
-        month = st.text_input("Billing month (e.g. JULY):")
-        year = st.text_input("Billing year (e.g. 2025):")
+        month = st.selectbox("Billing month:", [
+            "JANUARY", "FEBRUARY", "MARCH", "APRIL", "MAY", "JUNE", "JULY", "AUGUST", "SEPTEMBER", "OCTOBER", "NOVEMBER", "DECEMBER"
+        ])
+        current_year = datetime.datetime.now().year
+        st.markdown(f"**Billing year:** {current_year}")
+        # Add heading and button for arrears just before the entry fields
+        arrears_col1, arrears_col2 = st.columns([4,1])
+        with arrears_col1:
+            st.markdown("**Add Arrears/Move In-Out Entries (Optional)**")
+        with arrears_col2:
+            if st.form_submit_button("Add more Arrears"):
+                st.session_state['arrears_count'] += 1
+        arrears_data = []
+        for i in range(st.session_state['arrears_count']):
+            col1, col2 = st.columns([2,1])
+            with col1:
+                flat = st.selectbox(f"Flat/Owner #{i+1}", flat_options, key=f"flat_{i}")
+            with col2:
+                amount = st.number_input(f"Amount #{i+1}", key=f"amt_{i}")
+            arrears_data.append((flat, amount))
+        st.session_state['arrears_data'] = arrears_data
         submit = st.form_submit_button("Generate Monthly Maintenance Report")
 
     if submit:
-        if not (wateron_file and enclave_file and tankers and cauvery and month and year):
+        if not (wateron_file and enclave_file and tankers and cauvery and month):
             st.error("Please provide all inputs and upload both files.")
         else:
             tankers_val = validate_positive_int(tankers, "Number of water tankers")
             cauvery_val = validate_positive_int(cauvery, "Cauvery water bill")
             if tankers_val and cauvery_val:
-                result_bytes, copied = process_files(wateron_file, enclave_file, tankers_val, cauvery_val, month.strip().upper(), year.strip())
+                result_bytes, copied = process_files(wateron_file, enclave_file, tankers_val, cauvery_val, month.strip().upper(), str(current_year), st.session_state['arrears_data'])
                 st.success("Calculation sheet is ready!")
                 st.download_button("Download Updated Excel", data=result_bytes, file_name=f"_GN_Enclave_{month}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx")
                 if copied:
@@ -251,7 +304,9 @@ if st.session_state['completed']:
     with col3:
         if st.button("Exit"):
             st.warning("You can now close this browser tab. The Streamlit process will exit.")
+            import os
             os._exit(0)
 
+# Author credit at the bottom
 st.markdown("<hr style='margin-top:2em;margin-bottom:1em'>", unsafe_allow_html=True)
 st.markdown("<div style='text-align:center; color:gray; font-size: 1.1em;'>Developed by Vinay Kumar K | Cloud Architect</div>", unsafe_allow_html=True)
